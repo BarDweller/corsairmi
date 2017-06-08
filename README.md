@@ -9,6 +9,7 @@ Compiling
 - Register for a ThingSpeak channel at http://thingspeak.com/
 - Obtain the "Write API Key" from the Thingspeak channel 'API Keys' tab.
 - Edit the corsairmi.c and add the key around line 72 as the value for the char* `thingspeakapikey`
+ - Eg. `static char* thingspeakapikey = "4FRG9N5PECMDHK34";`
 
 You need libcurl dev available, on ubuntu `apt-get install libcurl4-openssl-dev` will be enough.
 
