@@ -1,8 +1,12 @@
 /* 
- * minimal program to read out data from Corsair RMi series of PSUs
+ * Minimal program to read out data from Corsair RMi series of PSUs
  * tested on RM750i
+ * 
+ * Updated with simple code to allow pushing of PSU data to ThingSpeak 
+ * channels.
  *
  * Copyright (c) notaz, 2016
+ * Copyright (c) bardweller, 2017
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -63,6 +67,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <linux/hidraw.h>
+#include <curl/curl.h>
+
+static char* thingspeakapikey = "KEY";
 
 static const uint16_t products[] = {
 	0x1c0b, /* RM750i */
@@ -177,6 +184,13 @@ static void print_std_reg(int fd, uint8_t reg, const char *fmt, ...)
 	printf("%5.1f\n", mkv(val));
 }
 
+static double get_std_reg(int fd, uint8_t reg)
+{
+ 	uint16_t val;
+  	read_reg16(fd,reg,&val);
+  	return mkv(val);
+}
+
 static int try_open_device(const char *name, int report_errors)
 {
 	struct hidraw_devinfo info;
@@ -222,73 +236,150 @@ out:
 
 int main(int argc, char *argv[])
 {
-	int had_eacces = 0;
-	char name[63];
-	uint32_t v32;
-	uint8_t osel;
-	int i, fd;
+        int had_eacces = 0;
+        char name[63];
+        uint32_t v32;
+        uint8_t osel;
+        int i, fd;
 
-	if (argc > 1) {
-		if (argv[1][0] == '-' || argc != 2) {
-			fprintf(stderr, "usage:\n");
-			fprintf(stderr, "%s [/dev/hidrawN]\n", argv[0]);
-			return 1;
-		}
-		fd = try_open_device(argv[1], 1);
+        double values[9]; /* 12v volts, amps, watts, 5v volts, amps, watts, 3.3v volts, amps, watts */
+        double temp1;
+        double temp2;
+        double fanrpm;
+        double supplyvolts;
+        double totalwatts;
+        uint32_t uptime;
+        uint32_t powered;
+
+        CURL *curl;
+        CURLcode res;
+
+        char url[1024];
+
+        if (argc > 1) {
+                if (argv[1][0] == '-' || argc != 2) {
+                        fprintf(stderr, "usage:\n");
+                        fprintf(stderr, "%s [/dev/hidrawN]\n", argv[0]);
+                        return 1;
+                }
+                fd = try_open_device(argv[1], 1);
+        }
+        else {
+                for (i = 0; i < 16; i++) {
+                        snprintf(name, sizeof(name), "/dev/hidraw%d", i);
+                        fd = try_open_device(name, 0);
+                        if (fd != -1)
+                                break;
+                        if (errno == EACCES)
+                                had_eacces = 1;
+                }
+                if (fd == -1) {
+                        fprintf(stderr, "No compatible devices found.\n");
+                        if (had_eacces)
+                                fprintf(stderr, "At least one device "
+                                        "could not be checked because "
+                                        "of lack of permissions for "
+                                        "/dev/hidraw*.\n");
+                }
+        }
+
+
+        if (fd == -1)
+                return 1;
+
+        name[sizeof(name) - 1] = 0;
+        send_recv_cmd(fd, 0xfe, 0x03, 0x00, name, sizeof(name) - 1);
+        printf("name:           '%s'\n", name);
+        read_reg(fd, 0x99, name, sizeof(name) - 1);
+        printf("vendor:         '%s'\n", name);
+        read_reg(fd, 0x9a, name, sizeof(name) - 1);
+        printf("product:        '%s'\n", name);
+
+        read_reg32(fd, 0xd1, &v32);
+        powered = v32;
+        printf("powered:        %u (%dd. %dh)\n",
+                v32, v32 / (24*60*60), v32 / (60*60) % 24);
+        read_reg32(fd, 0xd2, &v32);
+        uptime = v32;
+        printf("uptime:         %u (%dd. %dh)\n",
+                v32, v32 / (24*60*60), v32 / (60*60) % 24);
+
+        print_std_reg(fd, 0x8d, "temp1");
+        temp1 = get_std_reg(fd, 0x8d);
+        print_std_reg(fd, 0x8e, "temp2");
+        temp2 = get_std_reg(fd, 0x8e);
+        print_std_reg(fd, 0x90, "fan rpm");
+        fanrpm = get_std_reg(fd, 0x90);
+        print_std_reg(fd, 0x88, "supply volts");
+        supplyvolts = get_std_reg(fd, 0x88);
+        print_std_reg(fd, 0xee, "total watts");
+        totalwatts = get_std_reg(fd, 0xee);
+
+        i=0;
+        for (osel = 0; osel < 3; osel++) {
+                // reg0 write (output select)
+                send_recv_cmd(fd, 0x02, 0x00, osel, NULL, 0);
+                print_std_reg(fd, 0x8b, "output%u volts", osel);
+                values[i++] = get_std_reg(fd,0x8b);
+                print_std_reg(fd, 0x8c, "output%u amps", osel);
+                values[i++] = get_std_reg(fd,0x8c);
+                print_std_reg(fd, 0x96, "output%u watts", osel);
+                values[i++] = get_std_reg(fd,0x96);
+        }
+
+        send_recv_cmd(fd, 0x02, 0x00, 0x00, NULL, 0);
+
+        close(fd);
+
+	printf("Sending to url :: ");
+
+        snprintf(&url[0], 1024, "https://api.thingspeak.com/update?api_key=%s&field1=%u&field2=%5.3f&field3=%5.3f&field4=%5.3f&field5=%5.3f&field6=%5.3f&field7=%5.3f&field8=%5.3f",
+        thingspeakapikey		 
+	uptime,
+	temp1,
+	values[0],
+	values[1],
+	values[3],
+	values[4],
+	values[6],
+	values[7]
+	);
+/**
+        snprintf(&url[0], 1024, "https://data.sparkfun.com/input/STREAMID?private_key=PRIVATEKEY&powered=%u&uptime=%u&temp1=%5.3f&temp2=%5.3f&fanrpm=%5.3f&supplyvolts=%5.3f&totalwatts=%5.3f&12vvolts=%5.3f&12vamps=%5.3f&12vwatts=%5.3f&5vvolts=%5.3f&5vamps=%5.3f&5vwatts=%5.3f&33vvolts=%5.3f&33vamps=%5.3f&33vwatts=%5.3f",
+	powered,
+	uptime,
+	temp1,
+	temp2,
+	fanrpm,
+	supplyvolts,
+	totalwatts,
+	values[0],
+	values[1],
+	values[2],
+	values[3],
+	values[4],
+	values[5],
+	values[6],
+	values[7],
+	values[8]
+	);
+**/
+
+	printf("%s\n",url);
+	printf("\nResult :: ");
+
+	curl = curl_easy_init();
+	if(curl) {
+	    curl_easy_setopt(curl, CURLOPT_URL, url);
+	    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+	    res = curl_easy_perform(curl);
+	    if(res != CURLE_OK)
+	      fprintf(stderr, "curl_easy_perform() failed: %s\n",
+		      curl_easy_strerror(res));
+	    curl_easy_cleanup(curl);
 	}
-	else {
-		for (i = 0; i < 16; i++) {
-			snprintf(name, sizeof(name), "/dev/hidraw%d", i);
-			fd = try_open_device(name, 0);
-			if (fd != -1)
-				break;
-			if (errno == EACCES)
-				had_eacces = 1;
-		}
-		if (fd == -1) {
-			fprintf(stderr, "No compatible devices found.\n");
-			if (had_eacces)
-				fprintf(stderr, "At least one device "
-					"could not be checked because "
-					"of lack of permissions for "
-					"/dev/hidraw*.\n");
-		}
-	}
 
-	if (fd == -1)
-		return 1;
+	printf("\n");
 
-	name[sizeof(name) - 1] = 0;
-	send_recv_cmd(fd, 0xfe, 0x03, 0x00, name, sizeof(name) - 1);
-	printf("name:           '%s'\n", name);
-	read_reg(fd, 0x99, name, sizeof(name) - 1);
-	printf("vendor:         '%s'\n", name);
-	read_reg(fd, 0x9a, name, sizeof(name) - 1);
-	printf("product:        '%s'\n", name);
-
-	read_reg32(fd, 0xd1, &v32);
-	printf("powered:        %u (%dd. %dh)\n",
-		v32, v32 / (24*60*60), v32 / (60*60) % 24);
-	read_reg32(fd, 0xd2, &v32);
-	printf("uptime:         %u (%dd. %dh)\n",
-		v32, v32 / (24*60*60), v32 / (60*60) % 24);
-
-	print_std_reg(fd, 0x8d, "temp1");
-	print_std_reg(fd, 0x8e, "temp2");
-	print_std_reg(fd, 0x90, "fan rpm");
-	print_std_reg(fd, 0x88, "supply volts");
-	print_std_reg(fd, 0xee, "total watts");
-
-	for (osel = 0; osel < 3; osel++) {
-		// reg0 write (output select)
-		send_recv_cmd(fd, 0x02, 0x00, osel, NULL, 0);
-		print_std_reg(fd, 0x8b, "output%u volts", osel);
-		print_std_reg(fd, 0x8c, "output%u amps", osel);
-		print_std_reg(fd, 0x96, "output%u watts", osel);
-	}
-
-	send_recv_cmd(fd, 0x02, 0x00, 0x00, NULL, 0);
-
-	close(fd);
-	return 0;
+        return 0;
 }

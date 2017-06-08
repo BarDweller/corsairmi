@@ -1,5 +1,5 @@
 CFLAGS += -Wall -ggdb -O2
-LDLIBS += -lm
+LDLIBS += -lm -lcurl
 
 TARGET = corsairmi
 
