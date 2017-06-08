@@ -20,7 +20,8 @@ Usage
 `./corsairmi [/dev/hidrawN]`
 
 To automate, add this line to /etc/crontab, then every minute a push will be made to ThingSpeak.
-`*  *    * * *   root    /root/corsairmi/corsairmi`
+
+`*  *    * * *   root    /path/to/where/you/put/corsairmi`
 
 Ubuntu 16.04 notes
 ------------------
