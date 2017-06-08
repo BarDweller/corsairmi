@@ -334,7 +334,7 @@ int main(int argc, char *argv[])
 	printf("Sending to url :: ");
 
         snprintf(&url[0], 1024, "https://api.thingspeak.com/update?api_key=%s&field1=%u&field2=%5.3f&field3=%5.3f&field4=%5.3f&field5=%5.3f&field6=%5.3f&field7=%5.3f&field8=%5.3f",
-        thingspeakapikey		 
+        thingspeakapikey,		 
 	uptime,
 	temp1,
 	values[0],
